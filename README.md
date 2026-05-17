@@ -1,0 +1,107 @@
+# VSIX Image Gen Skill
+
+`VSIX Image Gen` 是一个给 `Codex`、`Claude Code`、`Hermes` 等 AI coding agent 使用的 skill，用来通过 `VSIX` 的 `gpt-image-2` 接口完成：
+
+- 文生图
+- 图生图
+- 本地参考图转 `data URI` 后上传
+- 首次 API Key 配置引导
+
+仓库地址：
+
+- [https://github.com/lilong-98/vsix-image-gen](https://github.com/lilong-98/vsix-image-gen)
+
+## 安装
+
+### Codex
+
+```bash
+mkdir -p ~/.codex/skills
+git clone https://github.com/lilong-98/vsix-image-gen ~/.codex/skills/vsix-image-gen
+```
+
+### Claude Code / 兼容 Skills 目录的 Agent
+
+如果你的 agent 使用自己的 skills 目录，把这个仓库 clone 到对应目录即可，例如：
+
+```bash
+git clone https://github.com/lilong-98/vsix-image-gen ~/.claude/skills/vsix-image-gen
+```
+
+## 配置 API Key
+
+先去 [https://vsix.cc](https://vsix.cc) 创建 API Key。
+
+推荐方式一：环境变量
+
+```bash
+export VSIX_API_KEY="YOUR_VSIX_KEY"
+```
+
+方式二：写入配置文件
+
+macOS / Linux:
+
+```bash
+mkdir -p ~/.vsix
+printf '%s\n' '{"api_key":"YOUR_VSIX_KEY"}' > ~/.vsix/config.json
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.vsix" | Out-Null
+Set-Content -Path "$env:USERPROFILE\.vsix\config.json" -Value '{"api_key":"YOUR_VSIX_KEY"}'
+```
+
+## 触发方式
+
+当用户说这些话时，agent 应该触发这个 skill：
+
+- 生图
+- 画图
+- 生成图片
+- 帮我画
+- gpt-image
+- Image2 生图
+- 参考这张图
+- 把这张图改成
+- generate an image
+- edit this photo
+- transform this picture
+
+## 命令行直接使用
+
+```bash
+node scripts/generate.js --prompt "A cinematic mechanical keyboard product shot" --size "1024x1024"
+```
+
+参考图：
+
+```bash
+node scripts/generate.js \
+  --prompt "Turn this into a watercolor poster" \
+  --image-url "/absolute/path/to/reference.png"
+```
+
+## 支持的尺寸
+
+- `1024x1024`
+- `1024x1536`
+- `1536x1024`
+- `auto`
+
+也支持这些别名：
+
+- `1:1`
+- `3:4`
+- `4:3`
+- `square`
+- `portrait`
+- `landscape`
+
+## 仓库结构
+
+- `SKILL.md`: skill 触发规则和执行流程
+- `agents/openai.yaml`: agent UI 元数据
+- `scripts/generate.js`: 实际调用 VSIX 图片接口的 CLI

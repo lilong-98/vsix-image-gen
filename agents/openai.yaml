@@ -1,0 +1,4 @@
+interface:
+  display_name: "VSIX Image Gen"
+  short_description: "Generate or edit images through VSIX GPT-Image, including first-run API key setup and reference-image handling."
+  default_prompt: "Use VSIX GPT-Image to generate or edit an image from my prompt or reference image."
