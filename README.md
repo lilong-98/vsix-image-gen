@@ -73,7 +73,10 @@ Set-Content -Path "$env:USERPROFILE\.vsix\config.json" -Value '{"api_key":"YOUR_
 ## 命令行直接使用
 
 ```bash
-node scripts/generate.js --prompt "A cinematic mechanical keyboard product shot" --size "1024x1024"
+node scripts/generate.js \
+  --prompt "A cinematic mechanical keyboard product shot" \
+  --size "1024x1024" \
+  --out "./keyboard.png"
 ```
 
 参考图：
@@ -89,6 +92,14 @@ node scripts/generate.js \
 - `1024x1024`
 - `1024x1536`
 - `1536x1024`
+- `1536x864`
+- `864x1536`
+- `1920x1080`
+- `1080x1920`
+- `2048x2048`
+- `3840x2160`
+- `2160x3840`
+- `2160x2160`
 - `auto`
 
 也支持这些别名：
@@ -96,9 +107,22 @@ node scripts/generate.js \
 - `1:1`
 - `3:4`
 - `4:3`
+- `16:9`
+- `9:16`
 - `square`
 - `portrait`
 - `landscape`
+- `wide`
+- `vertical`
+- `2k`
+- `2k-landscape`
+- `2k-portrait`
+- `4k`
+- `4k-landscape`
+- `4k-portrait`
+- `4k-square`
+
+如果传入 `--out`，CLI 会在接口返回 `data:image/...;base64` 或图片 URL 时直接保存成本地图片文件，并把文件路径打印到 stdout。
 
 ## 仓库结构
 

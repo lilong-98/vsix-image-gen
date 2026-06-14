@@ -7,19 +7,38 @@ const https = require("https");
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "";
 const CONFIG_PATH = path.join(HOME_DIR, ".vsix", "config.json");
 const API_BASE = process.env.VSIX_API_BASE || "https://vsix.cc/v1";
-const SUPPORTED_SIZES = new Set([
+const SUPPORTED_SIZES = [
   "1024x1024",
   "1024x1536",
   "1536x1024",
+  "1536x864",
+  "864x1536",
+  "1920x1080",
+  "1080x1920",
+  "2048x2048",
+  "3840x2160",
+  "2160x3840",
+  "2160x2160",
   "auto",
-]);
+];
 const SIZE_ALIASES = {
   "1:1": "1024x1024",
   "3:4": "1024x1536",
   "4:3": "1536x1024",
+  "16:9": "1536x864",
+  "9:16": "864x1536",
   square: "1024x1024",
   portrait: "1024x1536",
   landscape: "1536x1024",
+  wide: "1536x864",
+  vertical: "864x1536",
+  "2k": "1920x1080",
+  "2k-landscape": "1920x1080",
+  "2k-portrait": "1080x1920",
+  "4k": "3840x2160",
+  "4k-landscape": "3840x2160",
+  "4k-portrait": "2160x3840",
+  "4k-square": "2160x2160",
 };
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
@@ -40,12 +59,14 @@ function fail(message) {
 
 function printHelp() {
   log("Usage:");
-  log('  node generate.js --prompt "Describe the image" [--size 1024x1024] [--image-url URL_OR_FILE]');
+  log('  node generate.js --prompt "Describe the image" [--size 1024x1024] [--image-url URL_OR_FILE] [--out output.png]');
   log("");
   log("Supported sizes:");
-  log("  1024x1024, 1024x1536, 1536x1024, auto");
+  log(`  ${SUPPORTED_SIZES.join(", ")}`);
   log("Aliases:");
   log("  1:1, 3:4, 4:3, square, portrait, landscape");
+  log("  16:9, 9:16, wide, vertical, 2k, 2k-landscape, 2k-portrait");
+  log("  4k, 4k-landscape, 4k-portrait, 4k-square");
 }
 
 function expandHome(inputPath) {
@@ -90,9 +111,9 @@ function normalizeSize(rawSize) {
   const input = (rawSize || "1024x1024").trim().toLowerCase();
   const normalized = SIZE_ALIASES[input] || input;
 
-  if (!SUPPORTED_SIZES.has(normalized)) {
+  if (!SUPPORTED_SIZES.includes(normalized)) {
     fail(
-      `Unsupported size "${rawSize}". Use one of: ${Array.from(SUPPORTED_SIZES).join(", ")} or aliases ${Object.keys(
+      `Unsupported size "${rawSize}". Use one of: ${SUPPORTED_SIZES.join(", ")} or aliases ${Object.keys(
         SIZE_ALIASES
       ).join(", ")}.`
     );
@@ -106,6 +127,7 @@ function parseArgs(argv) {
     prompt: "",
     size: "1024x1024",
     imageUrls: [],
+    out: "",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -122,6 +144,10 @@ function parseArgs(argv) {
         break;
       case "--image-url":
         parsed.imageUrls.push(argv[index + 1] || "");
+        index += 1;
+        break;
+      case "--out":
+        parsed.out = argv[index + 1] || "";
         index += 1;
         break;
       case "--help":
@@ -232,6 +258,33 @@ function requestJson(urlString, apiKey, body) {
   });
 }
 
+function downloadFile(urlString, outputPath) {
+  const url = new URL(urlString);
+  const filePath = path.resolve(outputPath);
+
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const file = fs.createWriteStream(filePath);
+    const request = https.get(url, (response) => {
+      if ((response.statusCode || 0) >= 400) {
+        file.close(() => fs.rmSync(filePath, { force: true }));
+        reject(new Error(`Image download returned ${response.statusCode}`));
+        return;
+      }
+
+      response.pipe(file);
+      file.on("finish", () => {
+        file.close(() => resolve(filePath));
+      });
+    });
+
+    request.on("error", (error) => {
+      file.close(() => fs.rmSync(filePath, { force: true }));
+      reject(error);
+    });
+  });
+}
+
 function pickImageOutput(responseData) {
   const item = responseData && responseData.data && responseData.data[0];
   if (!item) {
@@ -249,6 +302,18 @@ function pickImageOutput(responseData) {
   return null;
 }
 
+function saveDataUri(dataUri, outputPath) {
+  const match = dataUri.match(/^data:([^;]+);base64,(.+)$/s);
+  if (!match) {
+    fail("The API returned a data URI, but it was not a base64 image payload.");
+  }
+
+  const filePath = path.resolve(outputPath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, Buffer.from(match[2], "base64"));
+  return filePath;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const apiKey = loadApiKey();
@@ -256,6 +321,9 @@ async function main() {
 
   log(`Prompt: ${args.prompt}`);
   log(`Size: ${args.size}`);
+  if (args.out) {
+    log(`Output file: ${args.out}`);
+  }
   if (normalizedImages.length > 0) {
     log(`Reference images: ${normalizedImages.length}`);
   }
@@ -299,6 +367,24 @@ async function main() {
   }
 
   log("Image generation finished.");
+  if (args.out) {
+    if (output.startsWith("data:image/")) {
+      const filePath = saveDataUri(output, args.out);
+      process.stdout.write(`${filePath}\n`);
+      return;
+    }
+
+    if (isRemoteUrl(output)) {
+      try {
+        const filePath = await downloadFile(output, args.out);
+        process.stdout.write(`${filePath}\n`);
+        return;
+      } catch (error) {
+        fail(`Image download failed: ${error.message}`);
+      }
+    }
+  }
+
   process.stdout.write(`${output}\n`);
 }
 
