@@ -12,6 +12,9 @@ const SUPPORTED_SIZES = [
   "1024x1024",
   "1024x1536",
   "1536x1024",
+  "768x768",
+  "768x1152",
+  "1152x768",
   "1536x864",
   "864x1536",
   "1920x1080",
@@ -48,6 +51,9 @@ const FALLBACK_SIZES = {
   "2048x2048": "1024x1024",
   "1920x1080": "1536x864",
   "1080x1920": "864x1536",
+  "1536x1024": "1152x768",
+  "1024x1536": "768x1152",
+  "1024x1024": "768x768",
 };
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
@@ -407,7 +413,7 @@ async function persistOutput(output, outputPath) {
   return null;
 }
 
-function buildRequestBody(args, normalizedImages, size) {
+function buildGenerationRequestBody(args, normalizedImages, size) {
   const requestBody = {
     model: "gpt-image-2",
     prompt: args.prompt,
@@ -424,12 +430,68 @@ function buildRequestBody(args, normalizedImages, size) {
   return requestBody;
 }
 
-async function submitGeneration(apiKey, requestBody) {
+function buildTextOnlyGenerationRequestBody(args, size) {
+  return {
+    model: "gpt-image-2",
+    prompt: args.prompt,
+    n: 1,
+    size,
+  };
+}
+
+function buildEditRequestBody(args, normalizedImages, size) {
+  return {
+    model: "gpt-image-2",
+    prompt: args.prompt,
+    n: 1,
+    size,
+    images: normalizedImages.map((image) => ({ image_url: image })),
+  };
+}
+
+async function submitImageRequest(apiKey, endpoint, requestBody) {
   try {
-    return await requestJson(`${API_BASE}/images/generations`, apiKey, requestBody);
+    return await requestJson(`${API_BASE}${endpoint}`, apiKey, requestBody);
   } catch (error) {
     fail(`Request failed: ${error.message}`);
   }
+}
+
+async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) {
+  if (normalizedImages.length === 0) {
+    return {
+      endpoint: "/images/generations",
+      response: await submitImageRequest(
+        apiKey,
+        "/images/generations",
+        buildGenerationRequestBody(args, normalizedImages, size)
+      ),
+    };
+  }
+
+  let response = await submitImageRequest(
+    apiKey,
+    "/images/edits",
+    buildEditRequestBody(args, normalizedImages, size)
+  );
+
+  if (response.status === 200) {
+    return { endpoint: "/images/edits", response };
+  }
+
+  if (isRetryableUpstreamError(response)) {
+    log(
+      `VSIX edits returned ${response.status} (${responseErrorMessage(response)}). Falling back to generations image input...`
+    );
+    response = await submitImageRequest(
+      apiKey,
+      "/images/generations",
+      buildGenerationRequestBody(args, normalizedImages, size)
+    );
+    return { endpoint: "/images/generations", response };
+  }
+
+  return { endpoint: "/images/edits", response };
 }
 
 async function main() {
@@ -445,11 +507,15 @@ async function main() {
   if (normalizedImages.length > 0) {
     log(`Reference images: ${normalizedImages.length}`);
   }
-  log("Requesting image generation from VSIX...");
-  let response = await submitGeneration(
+  const initialEndpoint = normalizedImages.length > 0 ? "/images/edits" : "/images/generations";
+  log(`Requesting image generation from VSIX (${initialEndpoint})...`);
+  let result = await submitWithEndpointFallback(
     apiKey,
-    buildRequestBody(args, normalizedImages, args.size)
+    args,
+    normalizedImages,
+    args.size
   );
+  let response = result.response;
   let generatedSize = args.size;
   let needsResize = false;
 
@@ -459,9 +525,25 @@ async function main() {
     log(
       `VSIX returned ${response.status} (${responseErrorMessage(response)}). Retrying at ${generatedSize}${needsResize ? `, then resizing to ${args.size}` : ""}...`
     );
-    response = await submitGeneration(
+    result = await submitWithEndpointFallback(
       apiKey,
-      buildRequestBody(args, normalizedImages, generatedSize)
+      args,
+      normalizedImages,
+      generatedSize
+    );
+    response = result.response;
+  }
+
+  if (response.status !== 200 && isRetryableUpstreamError(response) && normalizedImages.length > 0) {
+    log(
+      `Reference-image paths failed (${response.status}: ${responseErrorMessage(response)}). Falling back to text-only generation...`
+    );
+    generatedSize = FALLBACK_SIZES[generatedSize] || generatedSize;
+    needsResize = Boolean(args.out && parseSize(args.size) && generatedSize !== args.size);
+    response = await submitImageRequest(
+      apiKey,
+      "/images/generations",
+      buildTextOnlyGenerationRequestBody(args, generatedSize)
     );
   }
 

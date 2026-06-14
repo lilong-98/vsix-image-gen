@@ -7,6 +7,12 @@ description: "Use when the user asks to generate or edit images with VSIX GPT-Im
 
 Generate or edit images through VSIX's `gpt-image-2` endpoint. Prefer the bundled Node CLI so setup, request shape, and reference-image handling stay consistent across agent runs.
 
+The CLI chooses the VSIX endpoint automatically:
+- Text-to-image requests use `POST /v1/images/generations`.
+- Image-to-image requests with reference images prefer `POST /v1/images/edits` using `images[].image_url`.
+- If `edits` returns a retryable upstream error, the CLI falls back to the compatible `generations` image input path.
+- If all reference-image paths fail, the CLI can fall back to text-only generation. Treat that output as a best-effort fallback because it does not preserve the reference identity.
+
 ## Workflow
 1. Collect the user's prompt and decide whether this is text-to-image or image-to-image.
 2. Verify Node.js is available with `node -v`. If it is missing, ask the user to install Node.js from `https://nodejs.org/` before continuing.

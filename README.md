@@ -72,6 +72,13 @@ Set-Content -Path "$env:USERPROFILE\.vsix\config.json" -Value '{"api_key":"YOUR_
 
 ## 命令行直接使用
 
+CLI 会按任务类型自动选择接口：
+
+- 无参考图：`POST /v1/images/generations`
+- 有参考图：优先 `POST /v1/images/edits`，使用 `images[].image_url`
+- 如果 `edits` 上游返回可重试错误，自动回退到 `generations` 的兼容图片输入
+- 如果参考图路径全部失败，最后会用同一 prompt 做纯文生图兜底（不会保留参考图身份）
+
 ```bash
 node scripts/generate.js \
   --prompt "A cinematic mechanical keyboard product shot" \
@@ -92,6 +99,9 @@ node scripts/generate.js \
 - `1024x1024`
 - `1024x1536`
 - `1536x1024`
+- `768x768`
+- `768x1152`
+- `1152x768`
 - `1536x864`
 - `864x1536`
 - `1920x1080`
