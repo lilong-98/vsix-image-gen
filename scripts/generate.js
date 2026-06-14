@@ -55,6 +55,14 @@ const FALLBACK_SIZES = {
   "1024x1536": "768x1152",
   "1024x1024": "768x768",
 };
+const ENDPOINT_RETRY_LIMIT = Number.parseInt(
+  process.env.VSIX_IMAGE_RETRY_LIMIT || "4",
+  10
+);
+const ENDPOINT_RETRY_BASE_DELAY_MS = Number.parseInt(
+  process.env.VSIX_IMAGE_RETRY_BASE_DELAY_MS || "2500",
+  10
+);
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -70,6 +78,10 @@ function log(message) {
 function fail(message) {
   log(message);
   process.exit(1);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function printHelp() {
@@ -230,7 +242,10 @@ function resolveLocalFile(value) {
 
 function normalizeImageInput(value) {
   if (isRemoteUrl(value) || isDataUri(value)) {
-    return value;
+    return {
+      jsonValue: value,
+      multipartFile: isDataUri(value) ? dataUriToMultipartFile(value) : null,
+    };
   }
 
   const filePath = resolveLocalFile(value);
@@ -240,7 +255,14 @@ function normalizeImageInput(value) {
 
   const mimeType = getMimeType(filePath);
   const fileBuffer = fs.readFileSync(filePath);
-  return `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
+  return {
+    jsonValue: `data:${mimeType};base64,${fileBuffer.toString("base64")}`,
+    multipartFile: {
+      filename: path.basename(filePath),
+      mimeType,
+      buffer: fileBuffer,
+    },
+  };
 }
 
 function requestJson(urlString, apiKey, body) {
@@ -281,6 +303,91 @@ function requestJson(urlString, apiKey, body) {
 
     request.on("error", reject);
     request.write(JSON.stringify(body));
+    request.end();
+  });
+}
+
+function dataUriToMultipartFile(dataUri) {
+  const match = dataUri.match(/^data:([^;]+);base64,(.+)$/s);
+  if (!match) {
+    return null;
+  }
+
+  const mimeType = match[1];
+  const extension = mimeType.split("/")[1] || "png";
+  return {
+    filename: `reference.${extension}`,
+    mimeType,
+    buffer: Buffer.from(match[2], "base64"),
+  };
+}
+
+function requestMultipart(urlString, apiKey, fields, files) {
+  const url = new URL(urlString);
+  const boundary = `----vsix-image-gen-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
+  const chunks = [];
+
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`));
+    chunks.push(
+      Buffer.from(`Content-Disposition: form-data; name="${name}"\r\n\r\n`)
+    );
+    chunks.push(Buffer.from(`${value}\r\n`));
+  }
+
+  for (const file of files) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`));
+    chunks.push(
+      Buffer.from(
+        `Content-Disposition: form-data; name="image"; filename="${file.filename}"\r\n`
+      )
+    );
+    chunks.push(Buffer.from(`Content-Type: ${file.mimeType}\r\n\r\n`));
+    chunks.push(file.buffer);
+    chunks.push(Buffer.from("\r\n"));
+  }
+
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  const body = Buffer.concat(chunks);
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: url.hostname,
+        port: 443,
+        path: `${url.pathname}${url.search}`,
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+      },
+      (response) => {
+        const responseChunks = [];
+        response.on("data", (chunk) => responseChunks.push(chunk));
+        response.on("end", () => {
+          const raw = Buffer.concat(responseChunks).toString("utf8");
+
+          try {
+            resolve({
+              status: response.statusCode || 0,
+              data: JSON.parse(raw),
+            });
+          } catch {
+            resolve({
+              status: response.statusCode || 0,
+              data: raw,
+            });
+          }
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.write(body);
     request.end();
   });
 }
@@ -348,9 +455,16 @@ function responseErrorMessage(response) {
 function isRetryableUpstreamError(response) {
   const message = responseErrorMessage(response).toLowerCase();
   return (
-    [502, 503, 504].includes(response.status) ||
+    [502, 503, 504, 524].includes(response.status) ||
     message.includes("upstream") ||
-    message.includes("timeout")
+    message.includes("timeout") ||
+    message.includes("a timeout occurred") ||
+    message.includes("cloudflare") ||
+    message.includes("tls") ||
+    message.includes("ssl") ||
+    message.includes("socket") ||
+    message.includes("econnreset") ||
+    message.includes("bad record mac")
   );
 }
 
@@ -420,11 +534,12 @@ function buildGenerationRequestBody(args, normalizedImages, size) {
     n: 1,
     size,
   };
+  const imageValues = normalizedImages.map((image) => image.jsonValue);
 
-  if (normalizedImages.length === 1) {
-    requestBody.image = normalizedImages[0];
-  } else if (normalizedImages.length > 1) {
-    requestBody.image = normalizedImages;
+  if (imageValues.length === 1) {
+    requestBody.image = imageValues[0];
+  } else if (imageValues.length > 1) {
+    requestBody.image = imageValues;
   }
 
   return requestBody;
@@ -445,7 +560,27 @@ function buildEditRequestBody(args, normalizedImages, size) {
     prompt: args.prompt,
     n: 1,
     size,
-    images: normalizedImages.map((image) => ({ image_url: image })),
+    images: normalizedImages.map((image) => ({ image_url: image.jsonValue })),
+  };
+}
+
+function buildMultipartEditRequest(args, normalizedImages, size) {
+  const files = normalizedImages
+    .map((image) => image.multipartFile)
+    .filter(Boolean);
+
+  if (files.length === 0) {
+    return null;
+  }
+
+  return {
+    fields: {
+      model: "gpt-image-2",
+      prompt: args.prompt,
+      n: "1",
+      size,
+    },
+    files,
   };
 }
 
@@ -453,40 +588,143 @@ async function submitImageRequest(apiKey, endpoint, requestBody) {
   try {
     return await requestJson(`${API_BASE}${endpoint}`, apiKey, requestBody);
   } catch (error) {
-    fail(`Request failed: ${error.message}`);
+    return {
+      status: 0,
+      data: {
+        error: {
+          message: error.message,
+          type: "network_error",
+        },
+      },
+    };
   }
+}
+
+async function submitMultipartImageRequest(apiKey, endpoint, requestParts) {
+  try {
+    return await requestMultipart(
+      `${API_BASE}${endpoint}`,
+      apiKey,
+      requestParts.fields,
+      requestParts.files
+    );
+  } catch (error) {
+    return {
+      status: 0,
+      data: {
+        error: {
+          message: error.message,
+          type: "network_error",
+        },
+      },
+    };
+  }
+}
+
+async function submitWithRetry(apiKey, endpoint, requestBody, label) {
+  let response;
+
+  for (let attempt = 1; attempt <= ENDPOINT_RETRY_LIMIT; attempt += 1) {
+    response = await submitImageRequest(apiKey, endpoint, requestBody);
+
+    if (response.status === 200 || !isRetryableUpstreamError(response)) {
+      return response;
+    }
+
+    if (attempt < ENDPOINT_RETRY_LIMIT) {
+      const delay = ENDPOINT_RETRY_BASE_DELAY_MS * attempt;
+      log(
+        `${label} attempt ${attempt}/${ENDPOINT_RETRY_LIMIT} returned ${response.status || "network"} (${responseErrorMessage(response)}). Retrying in ${delay}ms...`
+      );
+      await sleep(delay);
+    }
+  }
+
+  return response;
+}
+
+async function submitMultipartWithRetry(apiKey, endpoint, requestParts, label) {
+  let response;
+
+  for (let attempt = 1; attempt <= ENDPOINT_RETRY_LIMIT; attempt += 1) {
+    response = await submitMultipartImageRequest(apiKey, endpoint, requestParts);
+
+    if (response.status === 200 || !isRetryableUpstreamError(response)) {
+      return response;
+    }
+
+    if (attempt < ENDPOINT_RETRY_LIMIT) {
+      const delay = ENDPOINT_RETRY_BASE_DELAY_MS * attempt;
+      log(
+        `${label} attempt ${attempt}/${ENDPOINT_RETRY_LIMIT} returned ${response.status || "network"} (${responseErrorMessage(response)}). Retrying in ${delay}ms...`
+      );
+      await sleep(delay);
+    }
+  }
+
+  return response;
+}
+
+function shouldTryMultipartEdit(response) {
+  const message = responseErrorMessage(response).toLowerCase();
+  return (
+    response.status === 400 ||
+    response.status === 422 ||
+    isRetryableUpstreamError(response) ||
+    message.includes("openai_error")
+  );
 }
 
 async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) {
   if (normalizedImages.length === 0) {
     return {
       endpoint: "/images/generations",
-      response: await submitImageRequest(
+      response: await submitWithRetry(
         apiKey,
         "/images/generations",
-        buildGenerationRequestBody(args, normalizedImages, size)
+        buildGenerationRequestBody(args, normalizedImages, size),
+        `VSIX generations ${size}`
       ),
     };
   }
 
-  let response = await submitImageRequest(
+  let response = await submitWithRetry(
     apiKey,
     "/images/edits",
-    buildEditRequestBody(args, normalizedImages, size)
+    buildEditRequestBody(args, normalizedImages, size),
+    `VSIX edits ${size}`
   );
 
   if (response.status === 200) {
     return { endpoint: "/images/edits", response };
   }
 
+  const multipartRequest = buildMultipartEditRequest(args, normalizedImages, size);
+  if (multipartRequest && shouldTryMultipartEdit(response)) {
+    log(
+      `VSIX edits JSON returned ${response.status} (${responseErrorMessage(response)}). Retrying with multipart image upload...`
+    );
+    response = await submitMultipartWithRetry(
+      apiKey,
+      "/images/edits",
+      multipartRequest,
+      `VSIX edits multipart ${size}`
+    );
+
+    if (response.status === 200) {
+      return { endpoint: "/images/edits", response };
+    }
+  }
+
   if (isRetryableUpstreamError(response)) {
     log(
       `VSIX edits returned ${response.status} (${responseErrorMessage(response)}). Falling back to generations image input...`
     );
-    response = await submitImageRequest(
+    response = await submitWithRetry(
       apiKey,
       "/images/generations",
-      buildGenerationRequestBody(args, normalizedImages, size)
+      buildGenerationRequestBody(args, normalizedImages, size),
+      `VSIX generations image input ${size}`
     );
     return { endpoint: "/images/generations", response };
   }
@@ -540,10 +778,11 @@ async function main() {
     );
     generatedSize = FALLBACK_SIZES[generatedSize] || generatedSize;
     needsResize = Boolean(args.out && parseSize(args.size) && generatedSize !== args.size);
-    response = await submitImageRequest(
+    response = await submitWithRetry(
       apiKey,
       "/images/generations",
-      buildTextOnlyGenerationRequestBody(args, generatedSize)
+      buildTextOnlyGenerationRequestBody(args, generatedSize),
+      `VSIX text-only fallback ${generatedSize}`
     );
   }
 

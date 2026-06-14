@@ -10,6 +10,7 @@ Generate or edit images through VSIX's `gpt-image-2` endpoint. Prefer the bundle
 The CLI chooses the VSIX endpoint automatically:
 - Text-to-image requests use `POST /v1/images/generations`.
 - Image-to-image requests with reference images prefer `POST /v1/images/edits` using `images[].image_url`.
+- If an OpenAI-compatible gateway rejects JSON edits with `openai_error`, the CLI retries `/images/edits` as `multipart/form-data` with uploaded image files. This is required for SubRouter-compatible image edits.
 - If `edits` returns a retryable upstream error, the CLI falls back to the compatible `generations` image input path.
 - If all reference-image paths fail, the CLI can fall back to text-only generation. Treat that output as a best-effort fallback because it does not preserve the reference identity.
 
@@ -108,6 +109,7 @@ node "$VSIX_IMAGE_GEN_CLI" \
 - When the user just says “帮我画” or “generate an image”, keep the default square size unless they clearly want wallpaper or banner proportions.
 - When the user asks for 2K or 4K, pass the matching size alias and use `--out` so the returned image is saved as a file instead of streaming a large data URI into the chat or terminal.
 - If VSIX returns a retryable upstream error for a high-resolution request, the CLI automatically retries at a smaller same-ratio size and resizes back to the requested output size when `--out` is set. This is especially useful for image-to-image requests with reference images.
+- For unstable gateway routing, the CLI retries retryable HTTP/network failures several times before fallback. Tune with `VSIX_IMAGE_RETRY_LIMIT`, `VSIX_IMAGE_RETRY_BASE_DELAY_MS`, and `VSIX_API_BASE` if needed.
 - When the request is an edit or style transfer, preserve the user's reference images and only rewrite the prompt enough to make the transformation clear.
 
 ## Output conventions

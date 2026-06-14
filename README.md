@@ -76,6 +76,7 @@ CLI 会按任务类型自动选择接口：
 
 - 无参考图：`POST /v1/images/generations`
 - 有参考图：优先 `POST /v1/images/edits`，使用 `images[].image_url`
+- 如果 OpenAI 兼容网关对 JSON 图生图返回 `openai_error`，自动改用 `multipart/form-data` 文件上传再次请求 `/images/edits`（SubRouter 图生图需要这个路径）
 - 如果 `edits` 上游返回可重试错误，自动回退到 `generations` 的兼容图片输入
 - 如果参考图路径全部失败，最后会用同一 prompt 做纯文生图兜底（不会保留参考图身份）
 
@@ -135,6 +136,14 @@ node scripts/generate.js \
 如果传入 `--out`，CLI 会在接口返回 `data:image/...;base64` 或图片 URL 时直接保存成本地图片文件，并把文件路径打印到 stdout。
 
 当高分辨率请求（例如 `4k`）遇到 VSIX 上游 `502/503/504` 或 `upstream timeout` 时，CLI 会自动用同宽高比的较小尺寸重试；如果你传入了 `--out`，重试成功后会再本地放大到原始目标尺寸。例如 `4k` 会自动降到 `1920x1080` 重试，再保存为 `3840x2160`。
+
+当 SubRouter/VSIX 网关短暂返回 `502/503/504`、超时或 TLS/SSL 断连时，CLI 会对每个接口请求做多次退避重试。可用 `VSIX_IMAGE_RETRY_LIMIT` 和 `VSIX_IMAGE_RETRY_BASE_DELAY_MS` 调整重试次数和基础等待时间。
+
+如果要直接走 SubRouter，可临时设置：
+
+```bash
+VSIX_API_BASE="https://subrouter.ai/v1" VSIX_API_KEY="YOUR_SUBROUTER_KEY" node scripts/generate.js ...
+```
 
 ## 仓库结构
 
