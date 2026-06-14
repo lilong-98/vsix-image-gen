@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const { spawnSync } = require("child_process");
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "";
 const CONFIG_PATH = path.join(HOME_DIR, ".vsix", "config.json");
@@ -39,6 +40,14 @@ const SIZE_ALIASES = {
   "4k-landscape": "3840x2160",
   "4k-portrait": "2160x3840",
   "4k-square": "2160x2160",
+};
+const FALLBACK_SIZES = {
+  "3840x2160": "1920x1080",
+  "2160x3840": "1080x1920",
+  "2160x2160": "1024x1024",
+  "2048x2048": "1024x1024",
+  "1920x1080": "1536x864",
+  "1080x1920": "864x1536",
 };
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
@@ -120,6 +129,18 @@ function normalizeSize(rawSize) {
   }
 
   return normalized;
+}
+
+function parseSize(size) {
+  const match = /^(\d+)x(\d+)$/.exec(size || "");
+  if (!match) {
+    return null;
+  }
+
+  return {
+    width: Number(match[1]),
+    height: Number(match[2]),
+  };
 }
 
 function parseArgs(argv) {
@@ -302,6 +323,31 @@ function pickImageOutput(responseData) {
   return null;
 }
 
+function responseErrorMessage(response) {
+  if (
+    response.data &&
+    response.data.error &&
+    response.data.error.message
+  ) {
+    return response.data.error.message;
+  }
+
+  if (typeof response.data === "string") {
+    return response.data;
+  }
+
+  return JSON.stringify(response.data);
+}
+
+function isRetryableUpstreamError(response) {
+  const message = responseErrorMessage(response).toLowerCase();
+  return (
+    [502, 503, 504].includes(response.status) ||
+    message.includes("upstream") ||
+    message.includes("timeout")
+  );
+}
+
 function saveDataUri(dataUri, outputPath) {
   const match = dataUri.match(/^data:([^;]+);base64,(.+)$/s);
   if (!match) {
@@ -312,6 +358,78 @@ function saveDataUri(dataUri, outputPath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, Buffer.from(match[2], "base64"));
   return filePath;
+}
+
+function resizeImage(inputPath, outputPath, targetSize) {
+  const size = parseSize(targetSize);
+  if (!size) {
+    return inputPath;
+  }
+
+  const script = [
+    "from pathlib import Path",
+    "from PIL import Image",
+    "import sys",
+    "src = Path(sys.argv[1])",
+    "dst = Path(sys.argv[2])",
+    "width = int(sys.argv[3])",
+    "height = int(sys.argv[4])",
+    "img = Image.open(src).convert('RGB')",
+    "img = img.resize((width, height), Image.Resampling.LANCZOS)",
+    "dst.parent.mkdir(parents=True, exist_ok=True)",
+    "img.save(dst, 'PNG', optimize=True)",
+  ].join("\n");
+
+  const result = spawnSync(
+    "python3",
+    ["-c", script, inputPath, outputPath, String(size.width), String(size.height)],
+    { encoding: "utf8" }
+  );
+
+  if (result.status !== 0) {
+    fail(
+      `Fallback resize failed. Install Pillow for Python or use a smaller native size. ${result.stderr || result.stdout}`
+    );
+  }
+
+  return path.resolve(outputPath);
+}
+
+async function persistOutput(output, outputPath) {
+  if (output.startsWith("data:image/")) {
+    return saveDataUri(output, outputPath);
+  }
+
+  if (isRemoteUrl(output)) {
+    return downloadFile(output, outputPath);
+  }
+
+  return null;
+}
+
+function buildRequestBody(args, normalizedImages, size) {
+  const requestBody = {
+    model: "gpt-image-2",
+    prompt: args.prompt,
+    n: 1,
+    size,
+  };
+
+  if (normalizedImages.length === 1) {
+    requestBody.image = normalizedImages[0];
+  } else if (normalizedImages.length > 1) {
+    requestBody.image = normalizedImages;
+  }
+
+  return requestBody;
+}
+
+async function submitGeneration(apiKey, requestBody) {
+  try {
+    return await requestJson(`${API_BASE}/images/generations`, apiKey, requestBody);
+  } catch (error) {
+    fail(`Request failed: ${error.message}`);
+  }
 }
 
 async function main() {
@@ -328,36 +446,27 @@ async function main() {
     log(`Reference images: ${normalizedImages.length}`);
   }
   log("Requesting image generation from VSIX...");
+  let response = await submitGeneration(
+    apiKey,
+    buildRequestBody(args, normalizedImages, args.size)
+  );
+  let generatedSize = args.size;
+  let needsResize = false;
 
-  const requestBody = {
-    model: "gpt-image-2",
-    prompt: args.prompt,
-    n: 1,
-    size: args.size,
-  };
-
-  if (normalizedImages.length === 1) {
-    requestBody.image = normalizedImages[0];
-  } else if (normalizedImages.length > 1) {
-    requestBody.image = normalizedImages;
-  }
-
-  let response;
-  try {
-    response = await requestJson(`${API_BASE}/images/generations`, apiKey, requestBody);
-  } catch (error) {
-    fail(`Request failed: ${error.message}`);
+  if (response.status !== 200 && isRetryableUpstreamError(response) && FALLBACK_SIZES[args.size]) {
+    generatedSize = FALLBACK_SIZES[args.size];
+    needsResize = Boolean(args.out && parseSize(args.size));
+    log(
+      `VSIX returned ${response.status} (${responseErrorMessage(response)}). Retrying at ${generatedSize}${needsResize ? `, then resizing to ${args.size}` : ""}...`
+    );
+    response = await submitGeneration(
+      apiKey,
+      buildRequestBody(args, normalizedImages, generatedSize)
+    );
   }
 
   if (response.status !== 200) {
-    const errorMessage =
-      response.data &&
-      response.data.error &&
-      response.data.error.message
-        ? response.data.error.message
-        : typeof response.data === "string"
-          ? response.data
-          : JSON.stringify(response.data);
+    const errorMessage = responseErrorMessage(response);
     fail(`VSIX API returned ${response.status}: ${errorMessage}`);
   }
 
@@ -368,20 +477,17 @@ async function main() {
 
   log("Image generation finished.");
   if (args.out) {
-    if (output.startsWith("data:image/")) {
-      const filePath = saveDataUri(output, args.out);
-      process.stdout.write(`${filePath}\n`);
-      return;
-    }
-
-    if (isRemoteUrl(output)) {
-      try {
-        const filePath = await downloadFile(output, args.out);
+    try {
+      let filePath = await persistOutput(output, args.out);
+      if (filePath && needsResize && generatedSize !== args.size) {
+        filePath = resizeImage(filePath, args.out, args.size);
+      }
+      if (filePath) {
         process.stdout.write(`${filePath}\n`);
         return;
-      } catch (error) {
-        fail(`Image download failed: ${error.message}`);
       }
+    } catch (error) {
+      fail(`Image save failed: ${error.message}`);
     }
   }
 

@@ -101,6 +101,7 @@ node "$VSIX_IMAGE_GEN_CLI" \
 - Also accept helpful aliases: `1:1`, `3:4`, `4:3`, `16:9`, `9:16`, `square`, `portrait`, `landscape`, `wide`, `vertical`, `2k`, `2k-landscape`, `2k-portrait`, `4k`, `4k-landscape`, `4k-portrait`, `4k-square`.
 - When the user just says “帮我画” or “generate an image”, keep the default square size unless they clearly want wallpaper or banner proportions.
 - When the user asks for 2K or 4K, pass the matching size alias and use `--out` so the returned image is saved as a file instead of streaming a large data URI into the chat or terminal.
+- If VSIX returns a retryable upstream error for a high-resolution request, the CLI automatically retries at a smaller same-ratio size and resizes back to the requested output size when `--out` is set. This is especially useful for image-to-image requests with reference images.
 - When the request is an edit or style transfer, preserve the user's reference images and only rewrite the prompt enough to make the transformation clear.
 
 ## Output conventions
