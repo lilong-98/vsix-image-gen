@@ -694,16 +694,6 @@ async function submitMultipartWithRetry(apiBase, apiKey, endpoint, requestParts,
   return response;
 }
 
-function shouldTryMultipartEdit(response) {
-  const message = responseErrorMessage(response).toLowerCase();
-  return (
-    response.status === 400 ||
-    response.status === 422 ||
-    isRetryableUpstreamError(response) ||
-    message.includes("openai_error")
-  );
-}
-
 async function submitWithEndpointFallback(apiBase, apiKey, args, normalizedImages, size) {
   if (normalizedImages.length === 0) {
     return {
@@ -718,24 +708,10 @@ async function submitWithEndpointFallback(apiBase, apiKey, args, normalizedImage
     };
   }
 
-  let response = await submitWithRetry(
-    apiBase,
-    apiKey,
-    "/images/edits",
-    buildEditRequestBody(args, normalizedImages, size),
-    `VSIX edits ${size}`
-  );
-
-  if (response.status === 200) {
-    return { endpoint: "/images/edits", response };
-  }
-
   const multipartRequest = buildMultipartEditRequest(args, normalizedImages, size);
-  if (multipartRequest && shouldTryMultipartEdit(response)) {
-    log(
-      `VSIX edits JSON returned ${response.status} (${responseErrorMessage(response)}). Retrying with multipart image upload...`
-    );
-    response = await submitMultipartWithRetry(
+  if (multipartRequest) {
+    log("Using multipart image upload for local reference edits...");
+    const multipartResponse = await submitMultipartWithRetry(
       apiBase,
       apiKey,
       "/images/edits",
@@ -743,9 +719,29 @@ async function submitWithEndpointFallback(apiBase, apiKey, args, normalizedImage
       `VSIX edits multipart ${size}`
     );
 
-    if (response.status === 200) {
-      return { endpoint: "/images/edits", response };
+    if (multipartResponse.status === 200) {
+      return { endpoint: "/images/edits", response: multipartResponse };
     }
+
+    if (!shouldTryJsonEditFallback(multipartResponse)) {
+      return { endpoint: "/images/edits", response: multipartResponse };
+    }
+
+    log(
+      `VSIX edits multipart returned ${multipartResponse.status} (${responseErrorMessage(multipartResponse)}). Falling back to JSON image references...`
+    );
+  }
+
+  let response = await submitWithRetry(
+    apiBase,
+    apiKey,
+    "/images/edits",
+    buildEditRequestBody(args, normalizedImages, size),
+    `VSIX edits JSON ${size}`
+  );
+
+  if (response.status === 200) {
+    return { endpoint: "/images/edits", response };
   }
 
   if (isRetryableUpstreamError(response)) {
@@ -763,6 +759,10 @@ async function submitWithEndpointFallback(apiBase, apiKey, args, normalizedImage
   }
 
   return { endpoint: "/images/edits", response };
+}
+
+function shouldTryJsonEditFallback(response) {
+  return isRetryableUpstreamError(response);
 }
 
 async function main() {

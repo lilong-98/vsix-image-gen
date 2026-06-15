@@ -75,8 +75,9 @@ Set-Content -Path "$env:USERPROFILE\.vsix\config.json" -Value '{"api_key":"YOUR_
 CLI 会按任务类型自动选择接口：
 
 - 无参考图：`POST /v1/images/generations`
-- 有参考图：优先 `POST /v1/images/edits`，使用 `images[].image_url`
-- 如果 OpenAI 兼容网关对 JSON 图生图返回 `openai_error`，自动改用 `multipart/form-data` 文件上传再次请求 `/images/edits`（SubRouter 图生图需要这个路径）
+- 有本地图片或 data URI 参考图：优先 `POST /v1/images/edits`，使用 `multipart/form-data` 上传文件
+- 只有远程 URL 参考图：使用 JSON `images[].image_url`
+- 如果 multipart 图生图遇到可重试网关/网络错误，自动回退到 JSON 图片引用
 - 如果 `edits` 上游返回可重试错误，自动回退到 `generations` 的兼容图片输入
 - 如果参考图路径全部失败，最后会用同一 prompt 做纯文生图兜底（不会保留参考图身份）
 

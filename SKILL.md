@@ -9,8 +9,9 @@ Generate or edit images through VSIX's `gpt-image-2` endpoint. Prefer the bundle
 
 The CLI chooses the VSIX endpoint automatically:
 - Text-to-image requests use `POST /v1/images/generations`.
-- Image-to-image requests with reference images prefer `POST /v1/images/edits` using `images[].image_url`.
-- If an OpenAI-compatible gateway rejects JSON edits with `openai_error`, the CLI retries `/images/edits` as `multipart/form-data` with uploaded image files. This is required for SubRouter-compatible image edits.
+- Image-to-image requests with local or data-URI reference images prefer `POST /v1/images/edits` as `multipart/form-data` uploads.
+- Image-to-image requests with only remote reference URLs use JSON `images[].image_url`.
+- If multipart edits hit retryable gateway/network failures, the CLI can fall back to JSON image references.
 - If `edits` returns a retryable upstream error, the CLI falls back to the compatible `generations` image input path.
 - If all reference-image paths fail, the CLI can fall back to text-only generation. Treat that output as a best-effort fallback because it does not preserve the reference identity.
 
