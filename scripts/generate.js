@@ -7,7 +7,7 @@ const { spawnSync } = require("child_process");
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "";
 const CONFIG_PATH = path.join(HOME_DIR, ".vsix", "config.json");
-const API_BASE = process.env.VSIX_API_BASE || "https://vsix.cc/v1";
+const DEFAULT_API_BASE = "https://vsix.cc/v1";
 const SUPPORTED_SIZES = [
   "1024x1024",
   "1024x1536",
@@ -110,11 +110,11 @@ function expandHome(inputPath) {
 }
 
 function loadApiKey() {
-  if (process.env.VSIX_API_KEY) {
-    return process.env.VSIX_API_KEY;
-  }
-
   if (!fs.existsSync(CONFIG_PATH)) {
+    if (process.env.VSIX_API_KEY) {
+      return process.env.VSIX_API_KEY;
+    }
+
     fail(
       `Missing VSIX API key. Set VSIX_API_KEY or create ${CONFIG_PATH} with {"api_key":"YOUR_KEY"}.`
     );
@@ -127,11 +127,40 @@ function loadApiKey() {
     fail(`Failed to parse ${CONFIG_PATH}: ${error.message}`);
   }
 
-  if (!config.api_key || config.api_key === "YOUR_KEY") {
+  const apiKey = process.env.VSIX_API_KEY || config.api_key;
+  if (!apiKey || apiKey === "YOUR_KEY") {
     fail(`Please update ${CONFIG_PATH} with a real VSIX API key.`);
   }
 
-  return config.api_key;
+  return apiKey;
+}
+
+function loadApiBase() {
+  let configuredBase = process.env.VSIX_API_BASE || "";
+
+  if (!configuredBase && fs.existsSync(CONFIG_PATH)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+      configuredBase = config.api_base || "";
+    } catch {
+      configuredBase = "";
+    }
+  }
+
+  return normalizeApiBase(configuredBase || DEFAULT_API_BASE);
+}
+
+function normalizeApiBase(rawBase) {
+  const trimmed = String(rawBase || "").trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    return DEFAULT_API_BASE;
+  }
+
+  if (trimmed.endsWith("/v1")) {
+    return trimmed;
+  }
+
+  return `${trimmed}/v1`;
 }
 
 function normalizeSize(rawSize) {
@@ -584,9 +613,9 @@ function buildMultipartEditRequest(args, normalizedImages, size) {
   };
 }
 
-async function submitImageRequest(apiKey, endpoint, requestBody) {
+async function submitImageRequest(apiBase, apiKey, endpoint, requestBody) {
   try {
-    return await requestJson(`${API_BASE}${endpoint}`, apiKey, requestBody);
+    return await requestJson(`${apiBase}${endpoint}`, apiKey, requestBody);
   } catch (error) {
     return {
       status: 0,
@@ -600,10 +629,10 @@ async function submitImageRequest(apiKey, endpoint, requestBody) {
   }
 }
 
-async function submitMultipartImageRequest(apiKey, endpoint, requestParts) {
+async function submitMultipartImageRequest(apiBase, apiKey, endpoint, requestParts) {
   try {
     return await requestMultipart(
-      `${API_BASE}${endpoint}`,
+      `${apiBase}${endpoint}`,
       apiKey,
       requestParts.fields,
       requestParts.files
@@ -621,11 +650,11 @@ async function submitMultipartImageRequest(apiKey, endpoint, requestParts) {
   }
 }
 
-async function submitWithRetry(apiKey, endpoint, requestBody, label) {
+async function submitWithRetry(apiBase, apiKey, endpoint, requestBody, label) {
   let response;
 
   for (let attempt = 1; attempt <= ENDPOINT_RETRY_LIMIT; attempt += 1) {
-    response = await submitImageRequest(apiKey, endpoint, requestBody);
+    response = await submitImageRequest(apiBase, apiKey, endpoint, requestBody);
 
     if (response.status === 200 || !isRetryableUpstreamError(response)) {
       return response;
@@ -643,11 +672,11 @@ async function submitWithRetry(apiKey, endpoint, requestBody, label) {
   return response;
 }
 
-async function submitMultipartWithRetry(apiKey, endpoint, requestParts, label) {
+async function submitMultipartWithRetry(apiBase, apiKey, endpoint, requestParts, label) {
   let response;
 
   for (let attempt = 1; attempt <= ENDPOINT_RETRY_LIMIT; attempt += 1) {
-    response = await submitMultipartImageRequest(apiKey, endpoint, requestParts);
+    response = await submitMultipartImageRequest(apiBase, apiKey, endpoint, requestParts);
 
     if (response.status === 200 || !isRetryableUpstreamError(response)) {
       return response;
@@ -675,11 +704,12 @@ function shouldTryMultipartEdit(response) {
   );
 }
 
-async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) {
+async function submitWithEndpointFallback(apiBase, apiKey, args, normalizedImages, size) {
   if (normalizedImages.length === 0) {
     return {
       endpoint: "/images/generations",
       response: await submitWithRetry(
+        apiBase,
         apiKey,
         "/images/generations",
         buildGenerationRequestBody(args, normalizedImages, size),
@@ -689,6 +719,7 @@ async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) 
   }
 
   let response = await submitWithRetry(
+    apiBase,
     apiKey,
     "/images/edits",
     buildEditRequestBody(args, normalizedImages, size),
@@ -705,6 +736,7 @@ async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) 
       `VSIX edits JSON returned ${response.status} (${responseErrorMessage(response)}). Retrying with multipart image upload...`
     );
     response = await submitMultipartWithRetry(
+      apiBase,
       apiKey,
       "/images/edits",
       multipartRequest,
@@ -721,6 +753,7 @@ async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) 
       `VSIX edits returned ${response.status} (${responseErrorMessage(response)}). Falling back to generations image input...`
     );
     response = await submitWithRetry(
+      apiBase,
       apiKey,
       "/images/generations",
       buildGenerationRequestBody(args, normalizedImages, size),
@@ -734,6 +767,7 @@ async function submitWithEndpointFallback(apiKey, args, normalizedImages, size) 
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const apiBase = loadApiBase();
   const apiKey = loadApiKey();
   const normalizedImages = args.imageUrls.map(normalizeImageInput);
 
@@ -746,8 +780,9 @@ async function main() {
     log(`Reference images: ${normalizedImages.length}`);
   }
   const initialEndpoint = normalizedImages.length > 0 ? "/images/edits" : "/images/generations";
-  log(`Requesting image generation from VSIX (${initialEndpoint})...`);
+  log(`Requesting image generation from VSIX (${apiBase}${initialEndpoint})...`);
   let result = await submitWithEndpointFallback(
+    apiBase,
     apiKey,
     args,
     normalizedImages,
@@ -764,6 +799,7 @@ async function main() {
       `VSIX returned ${response.status} (${responseErrorMessage(response)}). Retrying at ${generatedSize}${needsResize ? `, then resizing to ${args.size}` : ""}...`
     );
     result = await submitWithEndpointFallback(
+      apiBase,
       apiKey,
       args,
       normalizedImages,
@@ -779,6 +815,7 @@ async function main() {
     generatedSize = FALLBACK_SIZES[generatedSize] || generatedSize;
     needsResize = Boolean(args.out && parseSize(args.size) && generatedSize !== args.size);
     response = await submitWithRetry(
+      apiBase,
       apiKey,
       "/images/generations",
       buildTextOnlyGenerationRequestBody(args, generatedSize),

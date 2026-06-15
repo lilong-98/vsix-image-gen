@@ -145,6 +145,14 @@ node scripts/generate.js \
 VSIX_API_BASE="https://subrouter.ai/v1" VSIX_API_KEY="YOUR_SUBROUTER_KEY" node scripts/generate.js ...
 ```
 
+也可以把网关地址持久写入本地配置：
+
+```json
+{"api_key":"YOUR_KEY","api_base":"https://vsix.cc/v1"}
+```
+
+如果 `api_base` 只写到域名根地址（例如 `https://vsix.cc`），CLI 会自动补齐 `/v1`。
+
 ## 仓库结构
 
 - `SKILL.md`: skill 触发规则和执行流程

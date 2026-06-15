@@ -31,11 +31,12 @@ The CLI chooses the VSIX endpoint automatically:
 
 ## Environment
 - Preferred auth: `VSIX_API_KEY`
-- Fallback auth file: `~/.vsix/config.json`
+- Preferred base URL override: `VSIX_API_BASE`
+- Fallback config file: `~/.vsix/config.json`
 - Expected config shape:
 
 ```json
-{"api_key":"YOUR_VSIX_KEY"}
+{"api_key":"YOUR_VSIX_KEY","api_base":"https://vsix.cc/v1"}
 ```
 
 ## First-run setup
