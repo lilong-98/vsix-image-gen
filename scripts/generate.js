@@ -3,11 +3,15 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
-const { spawnSync } = require("child_process");
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "";
 const CONFIG_PATH = path.join(HOME_DIR, ".vsix", "config.json");
 const DEFAULT_API_BASE = "https://vsix.cc/v1";
+const SUPPORTED_MODELS = ["gpt-image-2", "gpt-image-2.5-sunburst"];
+const REQUEST_TIMEOUT_MS = Number.parseInt(
+  process.env.VSIX_IMAGE_REQUEST_TIMEOUT_MS || "120000",
+  10
+);
 const SUPPORTED_SIZES = [
   "1024x1024",
   "1024x1536",
@@ -44,17 +48,6 @@ const SIZE_ALIASES = {
   "4k-portrait": "2160x3840",
   "4k-square": "2160x2160",
 };
-const FALLBACK_SIZES = {
-  "3840x2160": "1920x1080",
-  "2160x3840": "1080x1920",
-  "2160x2160": "1024x1024",
-  "2048x2048": "1024x1024",
-  "1920x1080": "1536x864",
-  "1080x1920": "864x1536",
-  "1536x1024": "1152x768",
-  "1024x1536": "768x1152",
-  "1024x1024": "768x768",
-};
 const ENDPOINT_RETRY_LIMIT = Number.parseInt(
   process.env.VSIX_IMAGE_RETRY_LIMIT || "4",
   10
@@ -86,8 +79,9 @@ function sleep(ms) {
 
 function printHelp() {
   log("Usage:");
-  log('  node generate.js --prompt "Describe the image" [--size 1024x1024] [--image-url URL_OR_FILE] [--out output.png]');
+  log('  node generate.js --prompt "Describe the image" [--model MODEL] [--size 1024x1024] [--image-url URL_OR_FILE] [--out output.png]');
   log("");
+  log(`Supported models: ${SUPPORTED_MODELS.join(", ")}`);
   log("Supported sizes:");
   log(`  ${SUPPORTED_SIZES.join(", ")}`);
   log("Aliases:");
@@ -178,21 +172,10 @@ function normalizeSize(rawSize) {
   return normalized;
 }
 
-function parseSize(size) {
-  const match = /^(\d+)x(\d+)$/.exec(size || "");
-  if (!match) {
-    return null;
-  }
-
-  return {
-    width: Number(match[1]),
-    height: Number(match[2]),
-  };
-}
-
 function parseArgs(argv) {
   const parsed = {
     prompt: "",
+    model: "gpt-image-2",
     size: "1024x1024",
     imageUrls: [],
     out: "",
@@ -202,6 +185,10 @@ function parseArgs(argv) {
     const arg = argv[index];
 
     switch (arg) {
+      case "--model":
+        parsed.model = argv[index + 1] || "";
+        index += 1;
+        break;
       case "--prompt":
         parsed.prompt = argv[index + 1] || "";
         index += 1;
@@ -233,6 +220,7 @@ function parseArgs(argv) {
     process.exit(1);
   }
 
+  if (!SUPPORTED_MODELS.includes(parsed.model)) fail(`Unsupported model: ${parsed.model}`);
   parsed.size = normalizeSize(parsed.size);
   parsed.imageUrls = parsed.imageUrls.filter(Boolean);
   return parsed;
@@ -330,6 +318,7 @@ function requestJson(urlString, apiKey, body) {
       }
     );
 
+    request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error("Request timeout")));
     request.on("error", reject);
     request.write(JSON.stringify(body));
     request.end();
@@ -415,6 +404,7 @@ function requestMultipart(urlString, apiKey, fields, files) {
       }
     );
 
+    request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error("Request timeout")));
     request.on("error", reject);
     request.write(body);
     request.end();
@@ -509,41 +499,6 @@ function saveDataUri(dataUri, outputPath) {
   return filePath;
 }
 
-function resizeImage(inputPath, outputPath, targetSize) {
-  const size = parseSize(targetSize);
-  if (!size) {
-    return inputPath;
-  }
-
-  const script = [
-    "from pathlib import Path",
-    "from PIL import Image",
-    "import sys",
-    "src = Path(sys.argv[1])",
-    "dst = Path(sys.argv[2])",
-    "width = int(sys.argv[3])",
-    "height = int(sys.argv[4])",
-    "img = Image.open(src).convert('RGB')",
-    "img = img.resize((width, height), Image.Resampling.LANCZOS)",
-    "dst.parent.mkdir(parents=True, exist_ok=True)",
-    "img.save(dst, 'PNG', optimize=True)",
-  ].join("\n");
-
-  const result = spawnSync(
-    "python3",
-    ["-c", script, inputPath, outputPath, String(size.width), String(size.height)],
-    { encoding: "utf8" }
-  );
-
-  if (result.status !== 0) {
-    fail(
-      `Fallback resize failed. Install Pillow for Python or use a smaller native size. ${result.stderr || result.stdout}`
-    );
-  }
-
-  return path.resolve(outputPath);
-}
-
 async function persistOutput(output, outputPath) {
   if (output.startsWith("data:image/")) {
     return saveDataUri(output, outputPath);
@@ -558,7 +513,7 @@ async function persistOutput(output, outputPath) {
 
 function buildGenerationRequestBody(args, normalizedImages, size) {
   const requestBody = {
-    model: "gpt-image-2",
+    model: args.model,
     prompt: args.prompt,
     n: 1,
     size,
@@ -574,18 +529,9 @@ function buildGenerationRequestBody(args, normalizedImages, size) {
   return requestBody;
 }
 
-function buildTextOnlyGenerationRequestBody(args, size) {
-  return {
-    model: "gpt-image-2",
-    prompt: args.prompt,
-    n: 1,
-    size,
-  };
-}
-
 function buildEditRequestBody(args, normalizedImages, size) {
   return {
-    model: "gpt-image-2",
+    model: args.model,
     prompt: args.prompt,
     n: 1,
     size,
@@ -598,13 +544,13 @@ function buildMultipartEditRequest(args, normalizedImages, size) {
     .map((image) => image.multipartFile)
     .filter(Boolean);
 
-  if (files.length === 0) {
+  if (files.length !== normalizedImages.length || files.length === 0) {
     return null;
   }
 
   return {
     fields: {
-      model: "gpt-image-2",
+      model: args.model,
       prompt: args.prompt,
       n: "1",
       size,
@@ -771,6 +717,7 @@ async function main() {
   const apiKey = loadApiKey();
   const normalizedImages = args.imageUrls.map(normalizeImageInput);
 
+  log(`Model: ${args.model}`);
   log(`Prompt: ${args.prompt}`);
   log(`Size: ${args.size}`);
   if (args.out) {
@@ -781,47 +728,14 @@ async function main() {
   }
   const initialEndpoint = normalizedImages.length > 0 ? "/images/edits" : "/images/generations";
   log(`Requesting image generation from VSIX (${apiBase}${initialEndpoint})...`);
-  let result = await submitWithEndpointFallback(
+  const result = await submitWithEndpointFallback(
     apiBase,
     apiKey,
     args,
     normalizedImages,
     args.size
   );
-  let response = result.response;
-  let generatedSize = args.size;
-  let needsResize = false;
-
-  if (response.status !== 200 && isRetryableUpstreamError(response) && FALLBACK_SIZES[args.size]) {
-    generatedSize = FALLBACK_SIZES[args.size];
-    needsResize = Boolean(args.out && parseSize(args.size));
-    log(
-      `VSIX returned ${response.status} (${responseErrorMessage(response)}). Retrying at ${generatedSize}${needsResize ? `, then resizing to ${args.size}` : ""}...`
-    );
-    result = await submitWithEndpointFallback(
-      apiBase,
-      apiKey,
-      args,
-      normalizedImages,
-      generatedSize
-    );
-    response = result.response;
-  }
-
-  if (response.status !== 200 && isRetryableUpstreamError(response) && normalizedImages.length > 0) {
-    log(
-      `Reference-image paths failed (${response.status}: ${responseErrorMessage(response)}). Falling back to text-only generation...`
-    );
-    generatedSize = FALLBACK_SIZES[generatedSize] || generatedSize;
-    needsResize = Boolean(args.out && parseSize(args.size) && generatedSize !== args.size);
-    response = await submitWithRetry(
-      apiBase,
-      apiKey,
-      "/images/generations",
-      buildTextOnlyGenerationRequestBody(args, generatedSize),
-      `VSIX text-only fallback ${generatedSize}`
-    );
-  }
+  const response = result.response;
 
   if (response.status !== 200) {
     const errorMessage = responseErrorMessage(response);
@@ -836,10 +750,7 @@ async function main() {
   log("Image generation finished.");
   if (args.out) {
     try {
-      let filePath = await persistOutput(output, args.out);
-      if (filePath && needsResize && generatedSize !== args.size) {
-        filePath = resizeImage(filePath, args.out, args.size);
-      }
+      const filePath = await persistOutput(output, args.out);
       if (filePath) {
         process.stdout.write(`${filePath}\n`);
         return;

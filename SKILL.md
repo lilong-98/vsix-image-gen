@@ -5,15 +5,23 @@ description: "Use when the user asks to generate or edit images with VSIX GPT-Im
 
 # VSIX Image Gen
 
-Generate or edit images through VSIX's `gpt-image-2` endpoint. Prefer the bundled Node CLI so setup, request shape, and reference-image handling stay consistent across agent runs.
+Generate or edit images through VSIX using `gpt-image-2` or `gpt-image-2.5-sunburst`. Prefer the bundled Node CLI so setup, request shape, and reference-image handling stay consistent across agent runs.
 
 The CLI chooses the VSIX endpoint automatically:
 - Text-to-image requests use `POST /v1/images/generations`.
 - Image-to-image requests with local or data-URI reference images prefer `POST /v1/images/edits` as `multipart/form-data` uploads.
-- Image-to-image requests with only remote reference URLs use JSON `images[].image_url`.
+- Image-to-image requests containing remote reference URLs use JSON `images[].image_url`, including mixed local and remote references.
 - If multipart edits hit retryable gateway/network failures, the CLI can fall back to JSON image references.
 - If `edits` returns a retryable upstream error, the CLI falls back to the compatible `generations` image input path.
-- If all reference-image paths fail, the CLI can fall back to text-only generation. Treat that output as a best-effort fallback because it does not preserve the reference identity.
+- If all reference-image paths fail, return the error with the reference-image requirement intact.
+
+## Model selection
+
+- Support `gpt-image-2` (default) and `gpt-image-2.5-sunburst` through `--model`.
+- Use Sunburst when the user explicitly requests Sunburst or image 2.5. Keep `gpt-image-2` for unspecified requests so existing workflows retain their default.
+- Flare is not enabled in this release because its upstream generation test has not passed. If requested, explain its unavailable status rather than substituting another model.
+- Sunburst text-to-image has passed live testing. Its edit request construction is covered offline; live image editing remains unverified.
+- Keep the selected model and reference images throughout retries. A failed request is not permission to switch models or generate without the references.
 
 ## Workflow
 1. Collect the user's prompt and decide whether this is text-to-image or image-to-image.
@@ -66,6 +74,16 @@ export VSIX_IMAGE_GEN_CLI="$CODEX_HOME/skills/vsix-image-gen/scripts/generate.js
 If the user installed the skill elsewhere, adjust the CLI path accordingly.
 
 ## CLI quick start
+
+Sunburst:
+```bash
+node "$VSIX_IMAGE_GEN_CLI" \
+  --model "gpt-image-2.5-sunburst" \
+  --prompt "A yellow ceramic teapot on a pale blue table" \
+  --size "1024x1024" \
+  --out "./sunburst.png"
+```
+
 Square image:
 ```bash
 node "$VSIX_IMAGE_GEN_CLI" \
@@ -110,7 +128,7 @@ node "$VSIX_IMAGE_GEN_CLI" \
 - Also accept helpful aliases: `1:1`, `3:4`, `4:3`, `16:9`, `9:16`, `square`, `portrait`, `landscape`, `wide`, `vertical`, `2k`, `2k-landscape`, `2k-portrait`, `4k`, `4k-landscape`, `4k-portrait`, `4k-square`.
 - When the user just says “帮我画” or “generate an image”, keep the default square size unless they clearly want wallpaper or banner proportions.
 - When the user asks for 2K or 4K, pass the matching size alias and use `--out` so the returned image is saved as a file instead of streaming a large data URI into the chat or terminal.
-- If VSIX returns a retryable upstream error for a high-resolution request, the CLI automatically retries at a smaller same-ratio size and resizes back to the requested output size when `--out` is set. This is especially useful for image-to-image requests with reference images.
+- Keep the requested resolution during retries. Report an upstream failure rather than reducing the size and enlarging the result locally.
 - For unstable gateway routing, the CLI retries retryable HTTP/network failures several times before fallback. Tune with `VSIX_IMAGE_RETRY_LIMIT`, `VSIX_IMAGE_RETRY_BASE_DELAY_MS`, and `VSIX_API_BASE` if needed.
 - When the request is an edit or style transfer, preserve the user's reference images and only rewrite the prompt enough to make the transformation clear.
 

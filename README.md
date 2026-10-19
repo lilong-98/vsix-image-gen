@@ -1,6 +1,6 @@
 # VSIX Image Gen Skill
 
-`VSIX Image Gen` 是一个给 `Codex`、`Claude Code`、`Hermes` 等 AI coding agent 使用的 skill，用来通过 `VSIX` 的 `gpt-image-2` 接口完成：
+`VSIX Image Gen` 是一个给 `Codex`、`Claude Code`、`Hermes` 等 AI coding agent 使用的 skill，用来通过 `VSIX` 的 `gpt-image-2` / `gpt-image-2.5-sunburst` 接口完成：
 
 - 文生图
 - 图生图
@@ -70,16 +70,31 @@ Set-Content -Path "$env:USERPROFILE\.vsix\config.json" -Value '{"api_key":"YOUR_
 - edit this photo
 - transform this picture
 
+## 模型选择
+
+- `gpt-image-2`：默认模型，原有命令保持兼容。
+- `gpt-image-2.5-sunburst`：显式通过 `--model` 选择。
+
+```bash
+node scripts/generate.js \
+  --model "gpt-image-2.5-sunburst" \
+  --prompt "A yellow ceramic teapot on a pale blue table" \
+  --size "1024x1024" \
+  --out "./sunburst.png"
+```
+
+本次只接入已通过 VSIX 文生图实测的 Sunburst；Flare 上游测试尚未通过，暂不提供。图片编辑的请求构造与参考图保留已通过离线验证，Sunburst 的真实图片编辑仍需后续验证。上游服务仍可能返回 502/503；脚本会报告错误，不会自动切换模型。
+
 ## 命令行直接使用
 
 CLI 会按任务类型自动选择接口：
 
 - 无参考图：`POST /v1/images/generations`
 - 有本地图片或 data URI 参考图：优先 `POST /v1/images/edits`，使用 `multipart/form-data` 上传文件
-- 只有远程 URL 参考图：使用 JSON `images[].image_url`
+- 含远程 URL 参考图（包括混合本地与远程图片）：使用 JSON `images[].image_url`
 - 如果 multipart 图生图遇到可重试网关/网络错误，自动回退到 JSON 图片引用
 - 如果 `edits` 上游返回可重试错误，自动回退到 `generations` 的兼容图片输入
-- 如果参考图路径全部失败，最后会用同一 prompt 做纯文生图兜底（不会保留参考图身份）
+- 如果参考图接口全部失败，返回错误，保留参考图要求；不切换模型或退为纯文生图。
 
 ```bash
 node scripts/generate.js \
@@ -136,9 +151,9 @@ node scripts/generate.js \
 
 如果传入 `--out`，CLI 会在接口返回 `data:image/...;base64` 或图片 URL 时直接保存成本地图片文件，并把文件路径打印到 stdout。
 
-当高分辨率请求（例如 `4k`）遇到 VSIX 上游 `502/503/504` 或 `upstream timeout` 时，CLI 会自动用同宽高比的较小尺寸重试；如果你传入了 `--out`，重试成功后会再本地放大到原始目标尺寸。例如 `4k` 会自动降到 `1920x1080` 重试，再保存为 `3840x2160`。
+重试保持选定模型和请求尺寸；失败时返回错误，不自动降低尺寸或进行本地放大。
 
-当 SubRouter/VSIX 网关短暂返回 `502/503/504`、超时或 TLS/SSL 断连时，CLI 会对每个接口请求做多次退避重试。可用 `VSIX_IMAGE_RETRY_LIMIT` 和 `VSIX_IMAGE_RETRY_BASE_DELAY_MS` 调整重试次数和基础等待时间。
+当 SubRouter/VSIX 网关短暂返回 `502/503/504`、超时或 TLS/SSL 断连时，CLI 会对每个接口请求做多次退避重试。可用 `VSIX_IMAGE_RETRY_LIMIT` 和 `VSIX_IMAGE_RETRY_BASE_DELAY_MS` 调整每个接口的尝试次数和基础等待时间；`VSIX_IMAGE_RETRY_LIMIT=1` 表示不重试。请求超时默认 120 秒，可用 `VSIX_IMAGE_REQUEST_TIMEOUT_MS` 调整。
 
 如果要直接走 SubRouter，可临时设置：
 
